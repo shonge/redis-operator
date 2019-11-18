@@ -19,4 +19,4 @@ env:
   - IN_TRAVIS=true
 
 script:
-  - make test
+  - make build
