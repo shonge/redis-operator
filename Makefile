@@ -66,7 +66,7 @@ shell: docker-build
 # Build redis-failover executable file
 .PHONY: build
 build: docker-build
-    docker login -u $(USERNAME) -p '$(PASSWORD)'
+	docker login -u $(USERNAME) -p '$(PASSWORD)'
 	docker run -ti --rm -v $(PWD):$(WORKDIR) -u $(UID):$(UID) --name $(SERVICE_NAME) $(REPOSITORY)-dev ./scripts/build.sh
 
 # Run the development environment in the background
