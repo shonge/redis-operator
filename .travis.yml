@@ -20,4 +20,4 @@ env:
 
 script:
   - make build
-  - make publish
+  - make release
