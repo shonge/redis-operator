@@ -4,10 +4,10 @@ VERSION := v1.0.0-rc.2
 SERVICE_NAME := redis-operator
 
 # Docker image name for this project
-IMAGE_NAME := spotahome/$(SERVICE_NAME)
+IMAGE_NAME := shonge/$(SERVICE_NAME)
 
 # Repository url for this project
-REPOSITORY := quay.io/$(IMAGE_NAME)
+REPOSITORY := $(IMAGE_NAME)
 
 # Shell to use for running scripts
 SHELL := $(shell which bash)
@@ -66,6 +66,7 @@ shell: docker-build
 # Build redis-failover executable file
 .PHONY: build
 build: docker-build
+	docker login -u $(USERNAME) -p '$(PASSWORD)'
 	docker run -ti --rm -v $(PWD):$(WORKDIR) -u $(UID):$(UID) --name $(SERVICE_NAME) $(REPOSITORY)-dev ./scripts/build.sh
 
 # Run the development environment in the background
