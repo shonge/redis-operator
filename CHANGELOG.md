@@ -1,5 +1,60 @@
 # Changelog
 
+## [v1.0.0] - 2020-02-24
+
+### Major changes
+- Custom Resource Definition moved to `databases.spotahome.com`
+- Rolling updates are aware of cluster topology and nodes roles to follow minimum impact strategy
+- Better readiness probes for redis nodes.
+- More customizable options for kubernetes objects.
+- Better bootstrap times.
+- Improve security with password protected redis and security pod policies.
+- Redis 5 as default version
+- Update dependencies
+
+For detailed changelogs see rc relases
+
+## [v1.0.0-rc.5] - 2020-02-07
+
+### Changes
+- Custom annotations for services #216 @alecjacobs5401 
+- Update redis-exporter #222 @VerosK
+- Pod security policy to run as non root #228 @logdnalf
+- Custom command renames #234 @logdnalf
+
+### Fix
+- Add fsGroup to security context #215 @ese
+- Pod disruption budget lower than replicas #229 @tkrop
+- Add password support for readiness probes #235 @teamon
+  
+## [v1.0.0-rc.4] - 2019-12-17
+
+### Changes
+- Update kooper to v0.8.0
+- Update kubernetes to v1.15.6
+- Add support for `hostNetwork` and `dnsPolicy` in Redis and Sentinel pods #212 @paol
+
+## [v1.0.0-rc.3] - 2019-12-10
+
+### Action required
+
+Since update logic has been moved to operator, `PodManagementPolicy` has been set to `Parallel` in redis statefulSet. This improve bootstrap times.
+This field is immutable so to upgrade from previous rc releases you need to delete statefulSets manually. 
+*Note:* you can use `--cascade=false` flag to avoid disruption, pods will be adopted by the new statefulSet created by the operator.
+example: `kubectl delete statefulset --cascade=false rfr-redisfailover`
+
+### Changes
+
+- Move rolling update strategy to redis-operator to be cluster-aware #203 @chusAlvarez
+- Readiness probe check nodes belong to the cluster and are synced #206 @chusAlvarez
+- Support label propagation filter #195 @adamhf
+- Support for sentinel prometheus exporter #207 @shonge
+
+### Fix
+
+- Documentation and examples #204 @shonge
+- Add RBAC policy to access secrets #208 @hoffoo
+
 ## [v1.0.0-rc.2] - 2019-11-15
 
 ### Changes
@@ -248,6 +303,10 @@
 
 - Initial open-sourced release
 
+[v1.0.0]: https://github.com/spotahome/redis-operator/compare/0.5.8...v1.0.0
+[v1.0.0-rc.5]: https://github.com/spotahome/redis-operator/compare/v1.0.0-rc.4...v1.0.0-rc.5
+[v1.0.0-rc.4]: https://github.com/spotahome/redis-operator/compare/v1.0.0-rc.3...v1.0.0-rc.4
+[v1.0.0-rc.3]: https://github.com/spotahome/redis-operator/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [v1.0.0-rc.2]: https://github.com/spotahome/redis-operator/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [v1.0.0-rc.1]: https://github.com/spotahome/redis-operator/compare/0.5.8...v1.0.0-rc.1
 [0.5.8]: https://github.com/spotahome/redis-operator/compare/0.5.7...0.5.8

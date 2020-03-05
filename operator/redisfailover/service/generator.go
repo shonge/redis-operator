@@ -4,19 +4,32 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"bytes"
 
 	redisfailoverv1 "github.com/spotahome/redis-operator/api/redisfailover/v1"
 	"github.com/spotahome/redis-operator/operator/redisfailover/util"
+	"text/template"
 )
 
 const (
 	redisConfigurationVolumeName         = "redis-config"
+	// Template used to build the Redis configuration
+	redisConfigTemplate = `slaveof 127.0.0.1 6379
+tcp-keepalive 60
+save 900 1
+save 300 10
+{{- range .Spec.Redis.CustomCommandRenames}}
+rename-command "{{.From}}" "{{.To}}"
+{{- end}}
+`
 	redisShutdownConfigurationVolumeName = "redis-shutdown-config"
+	redisReadinessVolumeName             = "redis-readiness-config"
 	redisStorageVolumeName               = "redis-data"
 
 	graceTime = 30
@@ -36,6 +49,7 @@ func generateSentinelService(rf *redisfailoverv1.RedisFailover, labels map[strin
 			Namespace:       namespace,
 			Labels:          labels,
 			OwnerReferences: ownerRefs,
+			Annotations:     rf.Spec.Sentinel.ServiceAnnotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: selectorLabels,
@@ -57,6 +71,12 @@ func generateRedisService(rf *redisfailoverv1.RedisFailover, labels map[string]s
 
 	selectorLabels := generateSelectorLabels(redisRoleName, rf.Name)
 	labels = util.MergeLabels(labels, selectorLabels)
+	defaultAnnotations := map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   "http",
+		"prometheus.io/path":   "/metrics",
+	}
+	annotations := util.MergeLabels(defaultAnnotations, rf.Spec.Redis.ServiceAnnotations)
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -64,11 +84,7 @@ func generateRedisService(rf *redisfailoverv1.RedisFailover, labels map[string]s
 			Namespace:       namespace,
 			Labels:          labels,
 			OwnerReferences: ownerRefs,
-			Annotations: map[string]string{
-				"prometheus.io/scrape": "true",
-				"prometheus.io/port":   "http",
-				"prometheus.io/path":   "/metrics",
-			},
+			Annotations:     annotations,
 		},
 		Spec: corev1.ServiceSpec{
 			Type:      corev1.ServiceTypeClusterIP,
@@ -110,13 +126,19 @@ sentinel parallel-syncs mymaster 2`
 
 func generateRedisConfigMap(rf *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference, password string) *corev1.ConfigMap {
 	name := GetRedisName(rf)
-	namespace := rf.Namespace
-
 	labels = util.MergeLabels(labels, generateSelectorLabels(redisRoleName, rf.Name))
-	redisConfigFileContent := `slaveof 127.0.0.1 6379
-tcp-keepalive 60
-save 900 1
-save 300 10`
+
+	tmpl, err := template.New("redis").Parse(redisConfigTemplate)
+	if err != nil {
+		panic(err)
+	}
+
+	var tplOutput bytes.Buffer
+	if err := tmpl.Execute(&tplOutput, rf); err != nil {
+		panic(err)
+	}
+
+	redisConfigFileContent := tplOutput.String()
 
 	if password != "" {
 		redisConfigFileContent = fmt.Sprintf("%s\nmasterauth %s\nrequirepass %s", redisConfigFileContent, password, password)
@@ -125,7 +147,7 @@ save 300 10`
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
-			Namespace:       namespace,
+			Namespace:       rf.Namespace,
 			Labels:          labels,
 			OwnerReferences: ownerRefs,
 		},
@@ -158,6 +180,58 @@ fi`
 		},
 	}
 }
+func generateRedisReadinessConfigMap(rf *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) *corev1.ConfigMap {
+	name := GetRedisReadinessName(rf)
+	namespace := rf.Namespace
+
+	labels = util.MergeLabels(labels, generateSelectorLabels(redisRoleName, rf.Name))
+	readinessContent := `ROLE="role"
+   ROLE_MASTER="role:master"
+   ROLE_SLAVE="role:slave"
+   IN_SYNC="master_sync_in_progress:1"
+   NO_MASTER="master_host:127.0.0.1"
+
+   check_master(){
+           exit 0
+   }
+
+   check_slave(){
+           in_sync=$(redis-cli -a "${REDIS_PASSWORD}" info replication | grep $IN_SYNC | tr -d "\r" | tr -d "\n")
+           no_master=$(redis-cli -a "${REDIS_PASSWORD}" info replication | grep $NO_MASTER | tr -d "\r" | tr -d "\n")
+
+           if [ -z "$in_sync" ] && [ -z "$no_master" ]; then
+                   exit 0
+           fi
+
+           exit 1
+   }
+
+   role=$(redis-cli -a "${REDIS_PASSWORD}" info replication | grep $ROLE | tr -d "\r" | tr -d "\n")
+
+   case $role in
+           $ROLE_MASTER)
+                   check_master
+                   ;;
+           $ROLE_SLAVE)
+                   check_slave
+                   ;;
+           *)
+                   echo "unespected"
+                   exit 1
+   esac`
+
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       namespace,
+			Labels:          labels,
+			OwnerReferences: ownerRefs,
+		},
+		Data: map[string]string{
+			"ready.sh": readinessContent,
+		},
+	}
+}
 
 func generateRedisStatefulSet(rf *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) *appsv1.StatefulSet {
 	name := GetRedisName(rf)
@@ -180,8 +254,9 @@ func generateRedisStatefulSet(rf *redisfailoverv1.RedisFailover, labels map[stri
 			ServiceName: name,
 			Replicas:    &rf.Spec.Redis.Replicas,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: "RollingUpdate",
+				Type: v1.OnDeleteStatefulSetStrategyType,
 			},
+			PodManagementPolicy: v1.ParallelPodManagement,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: selectorLabels,
 			},
@@ -191,10 +266,12 @@ func generateRedisStatefulSet(rf *redisfailoverv1.RedisFailover, labels map[stri
 					Annotations: rf.Spec.Redis.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					Affinity:        getAffinity(rf.Spec.Redis.Affinity, labels),
-					Tolerations:     rf.Spec.Redis.Tolerations,
-					NodeSelector:    rf.Spec.Redis.NodeSelector,
-					SecurityContext: getSecurityContext(rf.Spec.Redis.SecurityContext),
+					Affinity:         getAffinity(rf.Spec.Redis.Affinity, labels),
+					Tolerations:      rf.Spec.Redis.Tolerations,
+					NodeSelector:     rf.Spec.Redis.NodeSelector,
+					SecurityContext:  getSecurityContext(rf.Spec.Redis.SecurityContext),
+					HostNetwork:      rf.Spec.Redis.HostNetwork,
+					DNSPolicy:        getDnsPolicy(rf.Spec.Redis.DNSPolicy),
 					ImagePullSecrets: rf.Spec.Redis.ImagePullSecrets,
 					Containers: []corev1.Container{
 						{
@@ -215,11 +292,7 @@ func generateRedisStatefulSet(rf *redisfailoverv1.RedisFailover, labels map[stri
 								TimeoutSeconds:      5,
 								Handler: corev1.Handler{
 									Exec: &corev1.ExecAction{
-										Command: []string{
-											"sh",
-											"-c",
-											"redis-cli -h $(hostname) ping",
-										},
+										Command: []string{"/bin/sh", "/redis-readiness/ready.sh"},
 									},
 								},
 							},
@@ -267,6 +340,20 @@ func generateRedisStatefulSet(rf *redisfailoverv1.RedisFailover, labels map[stri
 		ss.Spec.Template.Spec.Containers = append(ss.Spec.Template.Spec.Containers, exporter)
 	}
 
+	if rf.Spec.Auth.SecretPath != "" {
+		ss.Spec.Template.Spec.Containers[0].Env = append(ss.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{
+			Name: "REDIS_PASSWORD",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: rf.Spec.Auth.SecretPath,
+					},
+					Key: "password",
+				},
+			},
+		})
+	}
+
 	return ss
 }
 
@@ -279,7 +366,7 @@ func generateSentinelDeployment(rf *redisfailoverv1.RedisFailover, labels map[st
 	selectorLabels := generateSelectorLabels(sentinelRoleName, rf.Name)
 	labels = util.MergeLabels(labels, selectorLabels)
 
-	return &appsv1.Deployment{
+	sd := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            name,
 			Namespace:       namespace,
@@ -297,10 +384,12 @@ func generateSentinelDeployment(rf *redisfailoverv1.RedisFailover, labels map[st
 					Annotations: rf.Spec.Sentinel.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					Affinity:        getAffinity(rf.Spec.Sentinel.Affinity, labels),
-					Tolerations:     rf.Spec.Sentinel.Tolerations,
-					NodeSelector:    rf.Spec.Sentinel.NodeSelector,
-					SecurityContext: getSecurityContext(rf.Spec.Sentinel.SecurityContext),
+					Affinity:         getAffinity(rf.Spec.Sentinel.Affinity, labels),
+					Tolerations:      rf.Spec.Sentinel.Tolerations,
+					NodeSelector:     rf.Spec.Sentinel.NodeSelector,
+					SecurityContext:  getSecurityContext(rf.Spec.Sentinel.SecurityContext),
+					HostNetwork:      rf.Spec.Sentinel.HostNetwork,
+					DNSPolicy:        getDnsPolicy(rf.Spec.Sentinel.DNSPolicy),
 					ImagePullSecrets: rf.Spec.Sentinel.ImagePullSecrets,
 					InitContainers: []corev1.Container{
 						{
@@ -404,6 +493,11 @@ func generateSentinelDeployment(rf *redisfailoverv1.RedisFailover, labels map[st
 			},
 		},
 	}
+	if rf.Spec.Sentinel.Exporter.Enabled {
+		exporter := createSentinelExporterContainer(rf)
+		sd.Spec.Template.Spec.Containers = append(sd.Spec.Template.Spec.Containers, exporter)
+	}
+	return sd
 }
 
 func generatePodDisruptionBudget(name string, namespace string, labels map[string]string, ownerRefs []metav1.OwnerReference, minAvailable intstr.IntOrString) *policyv1beta1.PodDisruptionBudget {
@@ -486,6 +580,32 @@ func createRedisExporterContainer(rf *redisfailoverv1.RedisFailover) corev1.Cont
 	return container
 }
 
+func createSentinelExporterContainer(rf *redisfailoverv1.RedisFailover) corev1.Container {
+	container := corev1.Container{
+		Name:            sentinelExporterContainerName,
+		Image:           rf.Spec.Sentinel.Exporter.Image,
+		ImagePullPolicy: pullPolicy(rf.Spec.Sentinel.Exporter.ImagePullPolicy),
+		Ports: []corev1.ContainerPort{
+			{
+				Name:          "metrics",
+				ContainerPort: sentinelExporterPort,
+				Protocol:      corev1.ProtocolTCP,
+			},
+		},
+		Resources: corev1.ResourceRequirements{
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(exporterDefaultLimitCPU),
+				corev1.ResourceMemory: resource.MustParse(exporterDefaultLimitMemory),
+			},
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse(exporterDefaultRequestCPU),
+				corev1.ResourceMemory: resource.MustParse(exporterDefaultRequestMemory),
+			},
+		},
+	}
+	return container
+}
+
 func getAffinity(affinity *corev1.Affinity, labels map[string]string) *corev1.Affinity {
 	if affinity != nil {
 		return affinity
@@ -521,7 +641,15 @@ func getSecurityContext(secctx *corev1.PodSecurityContext) *corev1.PodSecurityCo
 		RunAsUser:    &defaultUserAndGroup,
 		RunAsGroup:   &defaultUserAndGroup,
 		RunAsNonRoot: &runAsNonRoot,
+		FSGroup:      &defaultUserAndGroup,
 	}
+}
+
+func getDnsPolicy(dnspolicy corev1.DNSPolicy) corev1.DNSPolicy {
+	if dnspolicy == "" {
+		return corev1.DNSClusterFirst
+	}
+	return dnspolicy
 }
 
 func getQuorum(rf *redisfailoverv1.RedisFailover) int32 {
@@ -539,6 +667,10 @@ func getRedisVolumeMounts(rf *redisfailoverv1.RedisFailover) []corev1.VolumeMoun
 			MountPath: "/redis-shutdown",
 		},
 		{
+			Name:      redisReadinessVolumeName,
+			MountPath: "/redis-readiness",
+		},
+		{
 			Name:      getRedisDataVolumeName(rf),
 			MountPath: "/data",
 		},
@@ -550,6 +682,7 @@ func getRedisVolumeMounts(rf *redisfailoverv1.RedisFailover) []corev1.VolumeMoun
 func getRedisVolumes(rf *redisfailoverv1.RedisFailover) []corev1.Volume {
 	configMapName := GetRedisName(rf)
 	shutdownConfigMapName := GetRedisShutdownConfigMapName(rf)
+	readinessConfigMapName := GetRedisReadinessName(rf)
 
 	executeMode := int32(0744)
 	volumes := []corev1.Volume{
@@ -569,6 +702,17 @@ func getRedisVolumes(rf *redisfailoverv1.RedisFailover) []corev1.Volume {
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{
 						Name: shutdownConfigMapName,
+					},
+					DefaultMode: &executeMode,
+				},
+			},
+		},
+		{
+			Name: redisReadinessVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: readinessConfigMapName,
 					},
 					DefaultMode: &executeMode,
 				},

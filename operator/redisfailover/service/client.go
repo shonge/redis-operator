@@ -19,6 +19,7 @@ type RedisFailoverClient interface {
 	EnsureRedisStatefulset(rFailover *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error
 	EnsureRedisService(rFailover *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error
 	EnsureRedisShutdownConfigMap(rFailover *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error
+	EnsureRedisReadinessConfigMap(rFailover *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error
 	EnsureRedisConfigMap(rFailover *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error
 	EnsureNotPresentRedisService(rFailover *redisfailoverv1.RedisFailover) error
 }
@@ -75,7 +76,7 @@ func (r *RedisFailoverKubeClient) EnsureRedisStatefulset(rf *redisfailoverv1.Red
 	return r.K8SService.CreateOrUpdateStatefulSet(rf.Namespace, ss)
 }
 
-// EnsureRedisConfigMap makes sure the sentinel configmap exists
+// EnsureRedisConfigMap makes sure the Redis ConfigMap exists
 func (r *RedisFailoverKubeClient) EnsureRedisConfigMap(rf *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error {
 
 	password, err := k8s.GetRedisPassword(r.K8SService, rf)
@@ -98,6 +99,12 @@ func (r *RedisFailoverKubeClient) EnsureRedisShutdownConfigMap(rf *redisfailover
 		return r.K8SService.CreateOrUpdateConfigMap(rf.Namespace, cm)
 	}
 	return nil
+}
+
+// EnsureRedisReadinessConfigMap makes sure the redis configmap with shutdown script exists
+func (r *RedisFailoverKubeClient) EnsureRedisReadinessConfigMap(rf *redisfailoverv1.RedisFailover, labels map[string]string, ownerRefs []metav1.OwnerReference) error {
+	cm := generateRedisReadinessConfigMap(rf, labels, ownerRefs)
+	return r.K8SService.CreateOrUpdateConfigMap(rf.Namespace, cm)
 }
 
 // EnsureRedisService makes sure the redis statefulset exists
@@ -123,6 +130,10 @@ func (r *RedisFailoverKubeClient) ensurePodDisruptionBudget(rf *redisfailoverv1.
 	namespace := rf.Namespace
 
 	minAvailable := intstr.FromInt(2)
+	if rf.Spec.Redis.Replicas <= 2 {
+		minAvailable = intstr.FromInt(int(rf.Spec.Redis.Replicas - 1))
+	}
+
 	labels = util.MergeLabels(labels, generateSelectorLabels(component, rf.Name))
 
 	pdb := generatePodDisruptionBudget(name, namespace, labels, ownerRefs, minAvailable)

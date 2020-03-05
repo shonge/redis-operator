@@ -3,7 +3,8 @@ package v1
 const (
 	defaultRedisNumber    = 3
 	defaultSentinelNumber = 3
-	defaultExporterImage  = "oliver006/redis_exporter:v0.33.0"
+	defaultSentinelExporterImage = "leominov/redis_sentinel_exporter:1.3.0"
+	defaultExporterImage  = "oliver006/redis_exporter:v1.3.5-alpine"
 	defaultImage          = "redis:5.0-alpine"
 )
 
